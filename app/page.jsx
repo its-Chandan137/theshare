@@ -43,6 +43,7 @@ export default function Home() {
   const [nameInput, setNameInput] = useState('')
   const [mounted, setMounted] = useState(false)
   const [showPairing, setShowPairing] = useState(false)
+  const [pairingActive, setPairingActive] = useState(false)
   const [pairingCode, setPairingCode] = useState('')
   const [qrData, setQrData] = useState('')
   const [qrImage, setQrImage] = useState('')
@@ -57,6 +58,13 @@ export default function Home() {
 
   useEffect(() => {
     setMounted(true)
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search)
+      const pair = params.get('pair')
+      if (pair) {
+        sessionStorage.setItem('theshare_pending_pair', pair)
+      }
+    }
   }, [])
 
   useEffect(() => {
@@ -85,13 +93,23 @@ export default function Home() {
       setDeviceId(newSocket.id)
       localStorage.setItem('theshare_device_id', newSocket.id)
       newSocket.emit('register', { name: deviceName, id: newSocket.id })
+      // Auto-join pair if pending
+      try {
+        const pending = sessionStorage.getItem('theshare_pending_pair')
+        if (pending) {
+          newSocket.emit('join-pair', { code: pending })
+          sessionStorage.removeItem('theshare_pending_pair')
+        }
+      } catch {}
     })
 
     newSocket.on('disconnect', () => {
       setIsConnected(false)
+      setPairingActive(false)
     })
 
     newSocket.on('paired', (data) => {
+      setPairingActive(true)
       setPairingCode(data.code)
       setResolvedIp(data.ip || window.location.hostname)
       const qrPayload = `http://${data.ip || window.location.hostname}:3000?pair=${data.code}`
@@ -106,15 +124,57 @@ export default function Home() {
         if (prev.find((d) => d.id === device.id)) return prev
         return [...prev, device]
       })
+      setPairingActive(true)
+      // Sync existing files to newly paired device
+      setFiles((currentFiles) => {
+        currentFiles.forEach((f) => {
+          if (f.direction === 'sent' && f.status === 'completed' && f.url) {
+            newSocket.emit('sync-file', {
+              fileId: f.id,
+              name: f.name,
+              size: f.size,
+              url: f.url,
+              senderId: newSocket.id,
+              direction: 'received'
+            })
+          }
+        })
+        return currentFiles
+      })
       addNotification('device-connected', device)
       setWidgetOpen(true)
     })
 
     newSocket.on('device-disconnected', (id) => {
-      const device = connectedDevices.find((d) => d.id === id)
-      setConnectedDevices((prev) => prev.filter((d) => d.id !== id))
-      addNotification('device-disconnected', device || { id, name: 'Unknown', type: 'device' })
-      setWidgetOpen(true)
+      setConnectedDevices((prev) => {
+        const device = prev.find((d) => d.id === id)
+        addNotification('device-disconnected', device || { id, name: 'Unknown', type: 'device' })
+        setWidgetOpen(true)
+        return prev.filter((d) => d.id !== id)
+      })
+    })
+
+    newSocket.on('sync-file', (fileData) => {
+      setFiles((prev) => {
+        const exists = prev.find((f) => f.id === fileData.fileId || f.name === fileData.name)
+        if (exists) return prev
+        return [{
+          id: fileData.fileId,
+          name: fileData.name,
+          size: fileData.size,
+          type: 'application/octet-stream',
+          direction: 'received',
+          status: 'completed',
+          progress: 100,
+          url: fileData.url,
+          createdAt: new Date(),
+          senderId: fileData.senderId || 'unknown',
+        }, ...prev]
+      })
+    })
+
+    newSocket.on('file-removed', (fileInfo) => {
+      setFiles((prev) => prev.filter((f) => f.id !== fileInfo.fileId && f.name !== fileInfo.name))
     })
 
     newSocket.on('file-ready', (file) => {
@@ -191,7 +251,19 @@ export default function Home() {
   }, [])
 
   const handleFiles = useCallback(async (fileList) => {
-    if (!fileList || !socketRef.current) return
+    console.log('[UPLOAD CHECK] connectedDevices:', connectedDevices.length, 'pairingActive:', pairingActive, 'pairingCode:', pairingCode ? 'SET' : 'NONE', 'fileList:', fileList ? Array.from(fileList).map(f => f.name) : 'NONE')
+    if (!fileList || !socketRef.current) {
+      console.log('[UPLOAD BLOCKED] No fileList or socket missing')
+      return
+    }
+    const canUpload = connectedDevices.length > 0 || pairingActive || !!pairingCode
+    console.log('[UPLOAD CHECK RESULT] canUpload:', canUpload, 'connectedDevices.length:', connectedDevices.length, 'pairingActive:', pairingActive, 'pairingCode:', pairingCode ? 'SET' : 'NONE')
+    if (!canUpload) {
+      console.log('[UPLOAD BLOCKED] Showing Pair device notification')
+      addNotification('device-limit', { name: 'Pair device to upload' })
+      return
+    }
+    console.log('[UPLOAD ALLOWED] Proceeding with upload')
     for (const file of Array.from(fileList)) {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
       const item = {
@@ -232,13 +304,20 @@ export default function Home() {
         )
       }
     }
-  }, [serverUrl])
+  }, [serverUrl, connectedDevices, pairingActive, pairingCode, addNotification])
 
   const handleDrop = useCallback((e) => {
+    console.log('[DROP CHECK] connectedDevices:', connectedDevices.length, 'pairingActive:', pairingActive, 'pairingCode:', pairingCode ? 'SET' : 'NONE')
     e.preventDefault()
     setDragging(false)
+    if (connectedDevices.length === 0 && !pairingActive && !pairingCode) {
+      console.log('[DROP BLOCKED] Showing Pair device notification')
+      addNotification('device-limit', { name: 'Pair device to upload' })
+      return
+    }
+    console.log('[DROP ALLOWED] Proceeding')
     handleFiles(e.dataTransfer.files)
-  }, [handleFiles])
+  }, [handleFiles, connectedDevices, pairingActive, addNotification])
 
   const handleDownload = useCallback((url) => {
     const a = document.createElement('a')
@@ -250,8 +329,12 @@ export default function Home() {
   }, [])
 
   const handleRemoveFile = useCallback((id) => {
+    const removedFile = files.find((f) => f.id === id)
+    if (socketRef.current && removedFile) {
+      socketRef.current.emit('file-removed', { fileId: removedFile.id, name: removedFile.name })
+    }
     setFiles((prev) => prev.filter((f) => f.id !== id))
-  }, [])
+  }, [files])
 
   const formatSize = (bytes) => {
     if (bytes === 0) return '0 B'
@@ -573,7 +656,7 @@ export default function Home() {
                 <h4 className="text-[11px] font-bold text-slate-200 uppercase tracking-[0.05em]">From connected devices</h4>
               </div>
               <div className="space-y-2">
-                {files.filter((f) => f.direction === 'received').map((f) => (
+                {files.filter((f) => f.direction === 'received' && !files.find((s) => s.direction === 'sent' && s.name === f.name)).map((f) => (
                   <div key={f.id} className="flex items-center justify-between p-3 rounded-2xl bg-white/[0.03] border border-white/[0.06] hover:bg-white/[0.07] hover:border-white/10 transition-all group">
                     <div className="flex items-center gap-3 min-w-0">
                       <div className="w-9 h-9 rounded-xl bg-indigo-500/10 flex items-center justify-center text-indigo-400 flex-shrink-0 shadow-inner shadow-indigo-500/5">
@@ -596,7 +679,7 @@ export default function Home() {
                     )}
                   </div>
                 ))}
-                {files.filter((f) => f.direction === 'received').length === 0 && (
+                {files.filter((f) => f.direction === 'received' && !files.find((s) => s.direction === 'sent' && s.name === f.name)).length === 0 && (
                   <p className="text-[11px] text-slate-600 py-2 pl-1">No files received yet</p>
                 )}
               </div>
@@ -620,7 +703,16 @@ export default function Home() {
                   ? 'border-brand-500 bg-brand-500/10'
                   : 'border-dashed border-white/10 bg-white/5 hover:border-white/20 hover:bg-white/10'
               )}
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => {
+                console.log('[CLICK CHECK] connectedDevices:', connectedDevices.length, 'pairingActive:', pairingActive, 'pairingCode:', pairingCode ? 'SET' : 'NONE')
+                if (connectedDevices.length === 0 && !pairingActive && !pairingCode) {
+                  console.log('[CLICK BLOCKED] Showing Pair device notification')
+                  addNotification('device-limit', { name: 'Pair device to upload' })
+                  return
+                }
+                console.log('[CLICK ALLOWED] Opening file picker')
+                fileInputRef.current?.click()
+              }}
             >
               <input
                 ref={fileInputRef}
@@ -680,7 +772,7 @@ export default function Home() {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-white">
-                  {n.type === 'device-connected' ? `${n.data.name} connected` : n.type === 'device-disconnected' ? `${n.data.name} disconnected` : n.type === 'device-limit' ? `Max devices reached` : `File received: ${n.data.name}`}
+                  {n.type === 'device-connected' ? `${n.data.name} connected` : n.type === 'device-disconnected' ? `${n.data.name} disconnected` : n.type === 'device-limit' ? (n.data?.name || 'Pair device to upload') : `File received: ${n.data.name}`}
                 </p>
                 <p className="text-[10px] text-slate-400 mt-0.5">
                   {n.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
