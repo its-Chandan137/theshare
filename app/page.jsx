@@ -43,6 +43,7 @@ export default function Home() {
   const [nameInput, setNameInput] = useState('')
   const [mounted, setMounted] = useState(false)
   const [showPairing, setShowPairing] = useState(false)
+  const [pairingActive, setPairingActive] = useState(false)
   const [pairingCode, setPairingCode] = useState('')
   const [qrData, setQrData] = useState('')
   const [qrImage, setQrImage] = useState('')
@@ -50,13 +51,20 @@ export default function Home() {
   const [widgetOpen, setWidgetOpen] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
   const fileInputRef = useRef(null)
-  const notifyTimerRef = useRef(null)
+  const notifyTimerRef = useRef({})
 
   const serverUrl = typeof window !== 'undefined' ? window.location.origin : ''
   const clientHostname = typeof window !== 'undefined' ? window.location.hostname : ''
 
   useEffect(() => {
     setMounted(true)
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search)
+      const pair = params.get('pair')
+      if (pair) {
+        sessionStorage.setItem('theshare_pending_pair', pair)
+      }
+    }
   }, [])
 
   useEffect(() => {
@@ -85,13 +93,23 @@ export default function Home() {
       setDeviceId(newSocket.id)
       localStorage.setItem('theshare_device_id', newSocket.id)
       newSocket.emit('register', { name: deviceName, id: newSocket.id })
+      // Auto-join pair if pending
+      try {
+        const pending = sessionStorage.getItem('theshare_pending_pair')
+        if (pending) {
+          newSocket.emit('join-pair', { code: pending })
+          sessionStorage.removeItem('theshare_pending_pair')
+        }
+      } catch {}
     })
 
     newSocket.on('disconnect', () => {
       setIsConnected(false)
+      setPairingActive(false)
     })
 
     newSocket.on('paired', (data) => {
+      setPairingActive(true)
       setPairingCode(data.code)
       setResolvedIp(data.ip || window.location.hostname)
       const qrPayload = `http://${data.ip || window.location.hostname}:3000?pair=${data.code}`
@@ -106,15 +124,57 @@ export default function Home() {
         if (prev.find((d) => d.id === device.id)) return prev
         return [...prev, device]
       })
+      setPairingActive(true)
+      // Sync existing files to newly paired device
+      setFiles((currentFiles) => {
+        currentFiles.forEach((f) => {
+          if (f.direction === 'sent' && f.status === 'completed' && f.url) {
+            newSocket.emit('sync-file', {
+              fileId: f.id,
+              name: f.name,
+              size: f.size,
+              url: f.url,
+              senderId: newSocket.id,
+              direction: 'received'
+            })
+          }
+        })
+        return currentFiles
+      })
       addNotification('device-connected', device)
       setWidgetOpen(true)
     })
 
     newSocket.on('device-disconnected', (id) => {
-      const device = connectedDevices.find((d) => d.id === id)
-      setConnectedDevices((prev) => prev.filter((d) => d.id !== id))
-      addNotification('device-disconnected', device || { id, name: 'Unknown', type: 'device' })
-      setWidgetOpen(true)
+      setConnectedDevices((prev) => {
+        const device = prev.find((d) => d.id === id)
+        addNotification('device-disconnected', device || { id, name: 'Unknown', type: 'device' })
+        setWidgetOpen(true)
+        return prev.filter((d) => d.id !== id)
+      })
+    })
+
+    newSocket.on('sync-file', (fileData) => {
+      setFiles((prev) => {
+        const exists = prev.find((f) => f.id === fileData.fileId || f.name === fileData.name)
+        if (exists) return prev
+        return [{
+          id: fileData.fileId,
+          name: fileData.name,
+          size: fileData.size,
+          type: 'application/octet-stream',
+          direction: 'received',
+          status: 'completed',
+          progress: 100,
+          url: fileData.url,
+          createdAt: new Date(),
+          senderId: fileData.senderId || 'unknown',
+        }, ...prev]
+      })
+    })
+
+    newSocket.on('file-removed', (fileInfo) => {
+      setFiles((prev) => prev.filter((f) => f.id !== fileInfo.fileId && f.name !== fileInfo.name))
     })
 
     newSocket.on('file-ready', (file) => {
@@ -161,13 +221,18 @@ export default function Home() {
     const id = Date.now()
     const notif = { id, type, data, timestamp: new Date() }
     setNotifications((prev) => [notif, ...prev])
-    if (notifyTimerRef.current) clearTimeout(notifyTimerRef.current)
-    notifyTimerRef.current = setTimeout(() => {
+    if (notifyTimerRef.current[id]) clearTimeout(notifyTimerRef.current[id])
+    notifyTimerRef.current[id] = setTimeout(() => {
       setNotifications((prev) => prev.filter((n) => n.id !== id))
-    }, 5000)
+      delete notifyTimerRef.current[id]
+    }, 3000)
   }, [])
 
   const dismissNotification = useCallback((id) => {
+    if (notifyTimerRef.current[id]) {
+      clearTimeout(notifyTimerRef.current[id])
+      delete notifyTimerRef.current[id]
+    }
     setNotifications((prev) => prev.filter((n) => n.id !== id))
   }, [])
 
@@ -186,7 +251,19 @@ export default function Home() {
   }, [])
 
   const handleFiles = useCallback(async (fileList) => {
-    if (!fileList || !socketRef.current) return
+    console.log('[UPLOAD CHECK] connectedDevices:', connectedDevices.length, 'pairingActive:', pairingActive, 'pairingCode:', pairingCode ? 'SET' : 'NONE', 'fileList:', fileList ? Array.from(fileList).map(f => f.name) : 'NONE')
+    if (!fileList || !socketRef.current) {
+      console.log('[UPLOAD BLOCKED] No fileList or socket missing')
+      return
+    }
+    const canUpload = connectedDevices.length > 0 || pairingActive || !!pairingCode
+    console.log('[UPLOAD CHECK RESULT] canUpload:', canUpload, 'connectedDevices.length:', connectedDevices.length, 'pairingActive:', pairingActive, 'pairingCode:', pairingCode ? 'SET' : 'NONE')
+    if (!canUpload) {
+      console.log('[UPLOAD BLOCKED] Showing Pair device notification')
+      addNotification('device-limit', { name: 'Pair device to upload' })
+      return
+    }
+    console.log('[UPLOAD ALLOWED] Proceeding with upload')
     for (const file of Array.from(fileList)) {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
       const item = {
@@ -227,13 +304,20 @@ export default function Home() {
         )
       }
     }
-  }, [serverUrl])
+  }, [serverUrl, connectedDevices, pairingActive, pairingCode, addNotification])
 
   const handleDrop = useCallback((e) => {
+    console.log('[DROP CHECK] connectedDevices:', connectedDevices.length, 'pairingActive:', pairingActive, 'pairingCode:', pairingCode ? 'SET' : 'NONE')
     e.preventDefault()
     setDragging(false)
+    if (connectedDevices.length === 0 && !pairingActive && !pairingCode) {
+      console.log('[DROP BLOCKED] Showing Pair device notification')
+      addNotification('device-limit', { name: 'Pair device to upload' })
+      return
+    }
+    console.log('[DROP ALLOWED] Proceeding')
     handleFiles(e.dataTransfer.files)
-  }, [handleFiles])
+  }, [handleFiles, connectedDevices, pairingActive, addNotification])
 
   const handleDownload = useCallback((url) => {
     const a = document.createElement('a')
@@ -243,6 +327,14 @@ export default function Home() {
     a.click()
     document.body.removeChild(a)
   }, [])
+
+  const handleRemoveFile = useCallback((id) => {
+    const removedFile = files.find((f) => f.id === id)
+    if (socketRef.current && removedFile) {
+      socketRef.current.emit('file-removed', { fileId: removedFile.id, name: removedFile.name })
+    }
+    setFiles((prev) => prev.filter((f) => f.id !== id))
+  }, [files])
 
   const formatSize = (bytes) => {
     if (bytes === 0) return '0 B'
@@ -510,56 +602,92 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Bottom Row Cards */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Transferring Card */}
-          <div className="bg-white/5 rounded-3xl shadow-xl border border-white/10 backdrop-blur-xl p-6">
-            <div className="flex items-center gap-2 mb-4">
-              <div className="w-8 h-8 rounded-xl bg-white/10 flex items-center justify-center text-slate-400">
-                <Upload className="w-4 h-4" />
+        {/* Bottom Section — 2 columns */}
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+          {/* Unified File Activity — Grouped by Device */}
+          <div className="lg:col-span-3 bg-white/5 rounded-3xl shadow-xl border border-white/10 backdrop-blur-xl p-6">
+            <div className="flex items-center gap-2 mb-5">
+              <div className="w-9 h-9 rounded-2xl bg-gradient-to-br from-brand-500/20 to-indigo-500/20 flex items-center justify-center text-brand-400 shadow-lg shadow-brand-500/10">
+                <File className="w-4 h-4" />
               </div>
-              <h3 className="text-sm font-semibold text-white">Transferring files</h3>
+              <div>
+                <h3 className="text-sm font-bold text-white tracking-tight">File Activity</h3>
+                <p className="text-[10px] text-slate-500">Grouped by source device</p>
+              </div>
+              <span className="ml-auto text-[10px] text-slate-400 bg-white/5 px-2.5 py-1 rounded-full border border-white/5">{files.length} total</span>
             </div>
-            <p className="text-xs text-slate-400 mb-4">
-              {files.filter((f) => f.direction === 'sent' && f.status !== 'completed').length} files &bull; {formatSize(files.filter((f) => f.direction === 'sent' && f.status !== 'completed').reduce((acc, f) => acc + f.size, 0))}
-            </p>
-            <div className="space-y-3">
-              {files.filter((f) => f.direction === 'sent').length > 0 ? (
-                files.filter((f) => f.direction === 'sent').map((f) => (
-                  <div key={f.id} className="flex items-center justify-between p-2 rounded-xl bg-white/5 border border-white/10">
-                    <div className="flex items-center gap-2">
-                      <div className="w-6 h-6 rounded-lg bg-white/10 flex items-center justify-center text-slate-400">
-                        <File className="w-3 h-3" />
+
+            {/* This device uploads */}
+            <div className="mb-5">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]" />
+                <h4 className="text-[11px] font-bold text-slate-200 uppercase tracking-[0.05em]">This device — uploads</h4>
+              </div>
+              <div className="space-y-2">
+                {files.filter((f) => f.direction === 'sent').map((f) => (
+                  <div key={f.id} className="flex items-center justify-between p-3 rounded-2xl bg-white/[0.03] border border-white/[0.06] hover:bg-white/[0.07] hover:border-white/10 transition-all group">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-xl bg-brand-500/10 flex items-center justify-center text-brand-400 flex-shrink-0 shadow-inner shadow-brand-500/5">
+                        <File className="w-4 h-4" />
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium text-white truncate max-w-[140px] sm:max-w-[170px] overflow-hidden">{f.name}</p>
-                        <p className="text-[10px] text-slate-500">{formatSize(f.size)}</p>
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-white truncate max-w-[140px] sm:max-w-[200px]">{f.name}</p>
+                        <p className="text-[10px] text-slate-500">{formatSize(f.size)} {f.createdAt ? `• ${new Date(f.createdAt).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}` : ''}</p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-1">
-                      {f.status === 'completed' ? (
-                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                      ) : f.status === 'error' ? (
-                        <XCircle className="w-3 h-3 text-rose-400" />
-                      ) : (
-                        <>
-                          <span className="text-[10px] font-medium text-brand-400">{f.progress}%</span>
-                          <Loader2 className="w-2.5 h-2.5 text-brand-400 animate-spin" />
-                        </>
-                      )}
-                    </div>
+                    <button
+                      onClick={() => handleRemoveFile(f.id)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-rose-500/15 to-rose-600/15 hover:from-rose-500/25 hover:to-rose-600/25 text-rose-300 text-[11px] font-bold transition-all border border-rose-500/20 hover:border-rose-400/40 shadow-sm hover:shadow-md hover:shadow-rose-500/10"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Remove
+                    </button>
                   </div>
-                ))
-              ) : (
-                <div className="text-center py-6">
-                  <p className="text-xs text-slate-500">No active transfers</p>
-                </div>
-              )}
+                ))}
+                {files.filter((f) => f.direction === 'sent').length === 0 && (
+                  <p className="text-[11px] text-slate-600 py-2 pl-1">No uploads yet</p>
+                )}
+              </div>
+            </div>
+
+            {/* Received files grouped */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <span className="w-2 h-2 rounded-full bg-indigo-400 shadow-[0_0_6px_rgba(129,140,248,0.6)]" />
+                <h4 className="text-[11px] font-bold text-slate-200 uppercase tracking-[0.05em]">From connected devices</h4>
+              </div>
+              <div className="space-y-2">
+                {files.filter((f) => f.direction === 'received' && !files.find((s) => s.direction === 'sent' && s.name === f.name)).map((f) => (
+                  <div key={f.id} className="flex items-center justify-between p-3 rounded-2xl bg-white/[0.03] border border-white/[0.06] hover:bg-white/[0.07] hover:border-white/10 transition-all group">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-xl bg-indigo-500/10 flex items-center justify-center text-indigo-400 flex-shrink-0 shadow-inner shadow-indigo-500/5">
+                        <Download className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-white truncate max-w-[140px] sm:max-w-[200px]">{f.name}</p>
+                        <p className="text-[10px] text-slate-500">{formatSize(f.size)} {f.createdAt ? `• ${new Date(f.createdAt).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}` : ''}</p>
+                      </div>
+                    </div>
+                    {f.status === 'completed' && f.url ? (
+                      <button
+                        onClick={() => handleDownload(f.url)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-brand-600 to-brand-500 hover:from-brand-500 hover:to-brand-400 text-xs text-white font-bold transition-all shadow-lg shadow-brand-600/20 hover:shadow-brand-500/40 hover:-translate-y-[1px]"
+                      >
+                        <Download className="w-3.5 h-3.5" /> Download
+                      </button>
+                    ) : (
+                      <span className="text-[10px] text-slate-600 bg-white/5 px-2 py-0.5 rounded-full">Ready</span>
+                    )}
+                  </div>
+                ))}
+                {files.filter((f) => f.direction === 'received' && !files.find((s) => s.direction === 'sent' && s.name === f.name)).length === 0 && (
+                  <p className="text-[11px] text-slate-600 py-2 pl-1">No files received yet</p>
+                )}
+              </div>
             </div>
           </div>
 
           {/* Drop Zone Card */}
-          <div className="bg-white/5 rounded-3xl shadow-xl border border-white/10 backdrop-blur-xl p-6 flex flex-col items-center justify-center h-full min-h-[320px]">
+          <div className="lg:col-span-2 bg-white/5 rounded-3xl shadow-xl border border-white/10 backdrop-blur-xl p-6 flex flex-col items-center justify-center h-full min-h-[320px]">
             <div className="w-14 h-14 rounded-2xl bg-white/10 flex items-center justify-center text-slate-400 mb-4">
               <Download className="w-6 h-6" />
             </div>
@@ -575,7 +703,16 @@ export default function Home() {
                   ? 'border-brand-500 bg-brand-500/10'
                   : 'border-dashed border-white/10 bg-white/5 hover:border-white/20 hover:bg-white/10'
               )}
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => {
+                console.log('[CLICK CHECK] connectedDevices:', connectedDevices.length, 'pairingActive:', pairingActive, 'pairingCode:', pairingCode ? 'SET' : 'NONE')
+                if (connectedDevices.length === 0 && !pairingActive && !pairingCode) {
+                  console.log('[CLICK BLOCKED] Showing Pair device notification')
+                  addNotification('device-limit', { name: 'Pair device to upload' })
+                  return
+                }
+                console.log('[CLICK ALLOWED] Opening file picker')
+                fileInputRef.current?.click()
+              }}
             >
               <input
                 ref={fileInputRef}
@@ -601,47 +738,6 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Received Files Card */}
-          <div className="bg-white/5 rounded-3xl shadow-xl border border-white/10 backdrop-blur-xl p-6">
-            <div className="flex items-center gap-2 mb-4">
-              <div className="w-8 h-8 rounded-xl bg-white/10 flex items-center justify-center text-slate-400">
-                <Download className="w-4 h-4" />
-              </div>
-              <h3 className="text-sm font-semibold text-white">Received files</h3>
-            </div>
-            <p className="text-xs text-slate-400 mb-4">Files sent to this device appear here</p>
-            <div className="space-y-2">
-              {files.filter((f) => f.direction === 'received').length > 0 ? (
-                files.filter((f) => f.direction === 'received').map((f) => (
-                  <div key={f.id} className="flex items-center justify-between p-2 rounded-xl bg-white/5 border border-white/10">
-                    <div className="flex items-center gap-2">
-                      <div className="w-6 h-6 rounded-lg bg-brand-500/20 flex items-center justify-center text-brand-400">
-                        <File className="w-3 h-3" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium text-white truncate max-w-[140px] sm:max-w-[170px] overflow-hidden">{f.name}</p>
-                        <p className="text-[10px] text-slate-500">{formatSize(f.size)} &bull; {f.createdAt ? new Date(f.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</p>
-                      </div>
-                    </div>
-                    {f.status === 'completed' && f.url ? (
-                      <button
-                        onClick={() => handleDownload(f.url)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-xs text-white font-semibold transition-all shadow-lg shadow-brand-500/20 hover:shadow-brand-500/40"
-                      >
-                        <Download className="w-3.5 h-3.5" /> Download
-                      </button>
-                    ) : (
-                      <span className="text-[10px] text-slate-500">Ready</span>
-                    )}
-                  </div>
-                ))
-              ) : (
-                <div className="text-center py-6">
-                  <p className="text-xs text-slate-500">No files yet</p>
-                </div>
-              )}
-            </div>
-          </div>
         </div>
       </main>
 
@@ -650,9 +746,22 @@ export default function Home() {
         {notifications.map((n) => {
           const typeColor = n.type === 'device-connected' ? 'text-brand-400 bg-brand-500/10 border-brand-500/20' : n.type === 'device-disconnected' ? 'text-rose-400 bg-rose-500/10 border-rose-500/20' : n.type === 'device-limit' ? 'text-amber-400 bg-amber-500/10 border-amber-500/20' : 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
           const Icon = n.type === 'device-connected' ? CheckCircle2 : n.type === 'device-disconnected' ? AlertCircle : n.type === 'device-limit' ? Shield : Check
+          
+          let touchStartX = 0
+          let touchEndX = 0
+          const handleTouchStart = (e) => { touchStartX = e.touches[0].clientX }
+          const handleTouchMove = (e) => { touchEndX = e.touches[0].clientX }
+          const handleTouchEnd = () => {
+            const diff = touchStartX - touchEndX
+            if (Math.abs(diff) > 60) dismissNotification(n.id)
+          }
+          
           return (
             <div
               key={n.id}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
               className={cn(
                 'flex items-start gap-3 px-4 py-3 rounded-[1rem] border backdrop-blur-xl shadow-2xl animate-in slide-in-from-right-2 duration-300 w-full sm:max-w-xs',
                 typeColor
@@ -663,7 +772,7 @@ export default function Home() {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-white">
-                  {n.type === 'device-connected' ? `${n.data.name} connected` : n.type === 'device-disconnected' ? `${n.data.name} disconnected` : n.type === 'device-limit' ? `Max devices reached` : `File received: ${n.data.name}`}
+                  {n.type === 'device-connected' ? `${n.data.name} connected` : n.type === 'device-disconnected' ? `${n.data.name} disconnected` : n.type === 'device-limit' ? (n.data?.name || 'Pair device to upload') : `File received: ${n.data.name}`}
                 </p>
                 <p className="text-[10px] text-slate-400 mt-0.5">
                   {n.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
