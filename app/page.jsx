@@ -244,6 +244,10 @@ export default function Home() {
     document.body.removeChild(a)
   }, [])
 
+  const handleRemoveFile = useCallback((id) => {
+    setFiles((prev) => prev.filter((f) => f.id !== id))
+  }, [])
+
   const formatSize = (bytes) => {
     if (bytes === 0) return '0 B'
     const k = 1024
@@ -510,56 +514,92 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Bottom Row Cards */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Transferring Card */}
-          <div className="bg-white/5 rounded-3xl shadow-xl border border-white/10 backdrop-blur-xl p-6">
-            <div className="flex items-center gap-2 mb-4">
-              <div className="w-8 h-8 rounded-xl bg-white/10 flex items-center justify-center text-slate-400">
-                <Upload className="w-4 h-4" />
+        {/* Bottom Section — 2 columns */}
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+          {/* Unified File Activity — Grouped by Device */}
+          <div className="lg:col-span-3 bg-white/5 rounded-3xl shadow-xl border border-white/10 backdrop-blur-xl p-6">
+            <div className="flex items-center gap-2 mb-5">
+              <div className="w-9 h-9 rounded-2xl bg-gradient-to-br from-brand-500/20 to-indigo-500/20 flex items-center justify-center text-brand-400 shadow-lg shadow-brand-500/10">
+                <File className="w-4 h-4" />
               </div>
-              <h3 className="text-sm font-semibold text-white">Transferring files</h3>
+              <div>
+                <h3 className="text-sm font-bold text-white tracking-tight">File Activity</h3>
+                <p className="text-[10px] text-slate-500">Grouped by source device</p>
+              </div>
+              <span className="ml-auto text-[10px] text-slate-400 bg-white/5 px-2.5 py-1 rounded-full border border-white/5">{files.length} total</span>
             </div>
-            <p className="text-xs text-slate-400 mb-4">
-              {files.filter((f) => f.direction === 'sent' && f.status !== 'completed').length} files &bull; {formatSize(files.filter((f) => f.direction === 'sent' && f.status !== 'completed').reduce((acc, f) => acc + f.size, 0))}
-            </p>
-            <div className="space-y-3">
-              {files.filter((f) => f.direction === 'sent').length > 0 ? (
-                files.filter((f) => f.direction === 'sent').map((f) => (
-                  <div key={f.id} className="flex items-center justify-between p-2 rounded-xl bg-white/5 border border-white/10">
-                    <div className="flex items-center gap-2">
-                      <div className="w-6 h-6 rounded-lg bg-white/10 flex items-center justify-center text-slate-400">
-                        <File className="w-3 h-3" />
+
+            {/* This device uploads */}
+            <div className="mb-5">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]" />
+                <h4 className="text-[11px] font-bold text-slate-200 uppercase tracking-[0.05em]">This device — uploads</h4>
+              </div>
+              <div className="space-y-2">
+                {files.filter((f) => f.direction === 'sent').map((f) => (
+                  <div key={f.id} className="flex items-center justify-between p-3 rounded-2xl bg-white/[0.03] border border-white/[0.06] hover:bg-white/[0.07] hover:border-white/10 transition-all group">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-xl bg-brand-500/10 flex items-center justify-center text-brand-400 flex-shrink-0 shadow-inner shadow-brand-500/5">
+                        <File className="w-4 h-4" />
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium text-white truncate max-w-[140px] sm:max-w-[170px] overflow-hidden">{f.name}</p>
-                        <p className="text-[10px] text-slate-500">{formatSize(f.size)}</p>
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-white truncate max-w-[140px] sm:max-w-[200px]">{f.name}</p>
+                        <p className="text-[10px] text-slate-500">{formatSize(f.size)} {f.createdAt ? `• ${new Date(f.createdAt).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}` : ''}</p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-1">
-                      {f.status === 'completed' ? (
-                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                      ) : f.status === 'error' ? (
-                        <XCircle className="w-3 h-3 text-rose-400" />
-                      ) : (
-                        <>
-                          <span className="text-[10px] font-medium text-brand-400">{f.progress}%</span>
-                          <Loader2 className="w-2.5 h-2.5 text-brand-400 animate-spin" />
-                        </>
-                      )}
-                    </div>
+                    <button
+                      onClick={() => handleRemoveFile(f.id)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-rose-500/15 to-rose-600/15 hover:from-rose-500/25 hover:to-rose-600/25 text-rose-300 text-[11px] font-bold transition-all border border-rose-500/20 hover:border-rose-400/40 shadow-sm hover:shadow-md hover:shadow-rose-500/10"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Remove
+                    </button>
                   </div>
-                ))
-              ) : (
-                <div className="text-center py-6">
-                  <p className="text-xs text-slate-500">No active transfers</p>
-                </div>
-              )}
+                ))}
+                {files.filter((f) => f.direction === 'sent').length === 0 && (
+                  <p className="text-[11px] text-slate-600 py-2 pl-1">No uploads yet</p>
+                )}
+              </div>
+            </div>
+
+            {/* Received files grouped */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <span className="w-2 h-2 rounded-full bg-indigo-400 shadow-[0_0_6px_rgba(129,140,248,0.6)]" />
+                <h4 className="text-[11px] font-bold text-slate-200 uppercase tracking-[0.05em]">From connected devices</h4>
+              </div>
+              <div className="space-y-2">
+                {files.filter((f) => f.direction === 'received').map((f) => (
+                  <div key={f.id} className="flex items-center justify-between p-3 rounded-2xl bg-white/[0.03] border border-white/[0.06] hover:bg-white/[0.07] hover:border-white/10 transition-all group">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-xl bg-indigo-500/10 flex items-center justify-center text-indigo-400 flex-shrink-0 shadow-inner shadow-indigo-500/5">
+                        <Download className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-white truncate max-w-[140px] sm:max-w-[200px]">{f.name}</p>
+                        <p className="text-[10px] text-slate-500">{formatSize(f.size)} {f.createdAt ? `• ${new Date(f.createdAt).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}` : ''}</p>
+                      </div>
+                    </div>
+                    {f.status === 'completed' && f.url ? (
+                      <button
+                        onClick={() => handleDownload(f.url)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-brand-600 to-brand-500 hover:from-brand-500 hover:to-brand-400 text-xs text-white font-bold transition-all shadow-lg shadow-brand-600/20 hover:shadow-brand-500/40 hover:-translate-y-[1px]"
+                      >
+                        <Download className="w-3.5 h-3.5" /> Download
+                      </button>
+                    ) : (
+                      <span className="text-[10px] text-slate-600 bg-white/5 px-2 py-0.5 rounded-full">Ready</span>
+                    )}
+                  </div>
+                ))}
+                {files.filter((f) => f.direction === 'received').length === 0 && (
+                  <p className="text-[11px] text-slate-600 py-2 pl-1">No files received yet</p>
+                )}
+              </div>
             </div>
           </div>
 
           {/* Drop Zone Card */}
-          <div className="bg-white/5 rounded-3xl shadow-xl border border-white/10 backdrop-blur-xl p-6 flex flex-col items-center justify-center h-full min-h-[320px]">
+          <div className="lg:col-span-2 bg-white/5 rounded-3xl shadow-xl border border-white/10 backdrop-blur-xl p-6 flex flex-col items-center justify-center h-full min-h-[320px]">
             <div className="w-14 h-14 rounded-2xl bg-white/10 flex items-center justify-center text-slate-400 mb-4">
               <Download className="w-6 h-6" />
             </div>
@@ -601,47 +641,6 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Received Files Card */}
-          <div className="bg-white/5 rounded-3xl shadow-xl border border-white/10 backdrop-blur-xl p-6">
-            <div className="flex items-center gap-2 mb-4">
-              <div className="w-8 h-8 rounded-xl bg-white/10 flex items-center justify-center text-slate-400">
-                <Download className="w-4 h-4" />
-              </div>
-              <h3 className="text-sm font-semibold text-white">Received files</h3>
-            </div>
-            <p className="text-xs text-slate-400 mb-4">Files sent to this device appear here</p>
-            <div className="space-y-2">
-              {files.filter((f) => f.direction === 'received').length > 0 ? (
-                files.filter((f) => f.direction === 'received').map((f) => (
-                  <div key={f.id} className="flex items-center justify-between p-2 rounded-xl bg-white/5 border border-white/10">
-                    <div className="flex items-center gap-2">
-                      <div className="w-6 h-6 rounded-lg bg-brand-500/20 flex items-center justify-center text-brand-400">
-                        <File className="w-3 h-3" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium text-white truncate max-w-[140px] sm:max-w-[170px] overflow-hidden">{f.name}</p>
-                        <p className="text-[10px] text-slate-500">{formatSize(f.size)} &bull; {f.createdAt ? new Date(f.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</p>
-                      </div>
-                    </div>
-                    {f.status === 'completed' && f.url ? (
-                      <button
-                        onClick={() => handleDownload(f.url)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-xs text-white font-semibold transition-all shadow-lg shadow-brand-500/20 hover:shadow-brand-500/40"
-                      >
-                        <Download className="w-3.5 h-3.5" /> Download
-                      </button>
-                    ) : (
-                      <span className="text-[10px] text-slate-500">Ready</span>
-                    )}
-                  </div>
-                ))
-              ) : (
-                <div className="text-center py-6">
-                  <p className="text-xs text-slate-500">No files yet</p>
-                </div>
-              )}
-            </div>
-          </div>
         </div>
       </main>
 
