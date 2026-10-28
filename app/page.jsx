@@ -50,7 +50,7 @@ export default function Home() {
   const [widgetOpen, setWidgetOpen] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
   const fileInputRef = useRef(null)
-  const notifyTimerRef = useRef(null)
+  const notifyTimerRef = useRef({})
 
   const serverUrl = typeof window !== 'undefined' ? window.location.origin : ''
   const clientHostname = typeof window !== 'undefined' ? window.location.hostname : ''
@@ -161,13 +161,18 @@ export default function Home() {
     const id = Date.now()
     const notif = { id, type, data, timestamp: new Date() }
     setNotifications((prev) => [notif, ...prev])
-    if (notifyTimerRef.current) clearTimeout(notifyTimerRef.current)
-    notifyTimerRef.current = setTimeout(() => {
+    if (notifyTimerRef.current[id]) clearTimeout(notifyTimerRef.current[id])
+    notifyTimerRef.current[id] = setTimeout(() => {
       setNotifications((prev) => prev.filter((n) => n.id !== id))
-    }, 5000)
+      delete notifyTimerRef.current[id]
+    }, 3000)
   }, [])
 
   const dismissNotification = useCallback((id) => {
+    if (notifyTimerRef.current[id]) {
+      clearTimeout(notifyTimerRef.current[id])
+      delete notifyTimerRef.current[id]
+    }
     setNotifications((prev) => prev.filter((n) => n.id !== id))
   }, [])
 
@@ -649,9 +654,22 @@ export default function Home() {
         {notifications.map((n) => {
           const typeColor = n.type === 'device-connected' ? 'text-brand-400 bg-brand-500/10 border-brand-500/20' : n.type === 'device-disconnected' ? 'text-rose-400 bg-rose-500/10 border-rose-500/20' : n.type === 'device-limit' ? 'text-amber-400 bg-amber-500/10 border-amber-500/20' : 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
           const Icon = n.type === 'device-connected' ? CheckCircle2 : n.type === 'device-disconnected' ? AlertCircle : n.type === 'device-limit' ? Shield : Check
+          
+          let touchStartX = 0
+          let touchEndX = 0
+          const handleTouchStart = (e) => { touchStartX = e.touches[0].clientX }
+          const handleTouchMove = (e) => { touchEndX = e.touches[0].clientX }
+          const handleTouchEnd = () => {
+            const diff = touchStartX - touchEndX
+            if (Math.abs(diff) > 60) dismissNotification(n.id)
+          }
+          
           return (
             <div
               key={n.id}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
               className={cn(
                 'flex items-start gap-3 px-4 py-3 rounded-[1rem] border backdrop-blur-xl shadow-2xl animate-in slide-in-from-right-2 duration-300 w-full sm:max-w-xs',
                 typeColor
